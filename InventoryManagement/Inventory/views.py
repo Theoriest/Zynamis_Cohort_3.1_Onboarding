@@ -57,6 +57,7 @@ class StandardResultsSetPagination(PageNumberPagination):
 # Token acquisition (login / refresh) is handled by the JWT library's own
 # views wired up in urls.py. These views cover registration and profile.
 # ---------------------------------------------------------------------------
+
 class RegisterView(generics.CreateAPIView):
     """Open endpoint: register a new (Employee) account."""
 
@@ -78,6 +79,7 @@ class ProfileView(generics.RetrieveUpdateAPIView):
 # ---------------------------------------------------------------------------
 # Catalogue
 # ---------------------------------------------------------------------------
+
 class CategoryViewSet(viewsets.ModelViewSet):
     """Managers maintain categories; any authenticated user may read them."""
 
@@ -143,10 +145,11 @@ class ResourceViewSet(viewsets.ModelViewSet):
 class ResourceBrowseViewSet(viewsets.ReadOnlyModelViewSet):
     """Employees browse available resources and view resource details.
 
-    Availability (per the model decisions) means: active, not currently
-    booked, already returned, and with stock on hand. A date range may be
-    supplied; it is validated (end after start) and reserved for the
-    date-aware availability the schema will grow into.
+    Availability is derived from approved bookings over an optional date
+    range (?start_date=&end_date=): each resource is annotated with
+    ``available`` = total_quantity - approved units overlapping that range.
+    The default ``availability=available`` filter hides inactive resources
+    and anything with no free units for the range (or no stock at all).
     """
 
     serializer_class = ResourceBrowseSerializer
@@ -155,16 +158,17 @@ class ResourceBrowseViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         params = self.request.query_params
-        qs = Resource.objects.select_related("category").all()
+        start = params.get("start_date")
+        end = params.get("end_date")
+        self._validate_date_range(start, end)
 
-        # Default to only the resources an employee can actually book.
+        qs = Resource.objects.select_related("category").all()
+        # Annotate `available` for the requested range (falls back to total).
+        qs = Resource.annotate_availability(qs, start, end)
+
+        # Default: only resources an employee can actually book right now.
         if params.get("availability", "available").lower() == "available":
-            qs = qs.filter(
-                is_active=True,
-                is_booked=False,
-                is_returned=True,
-                available_quantity__gt=0,
-            )
+            qs = qs.filter(is_active=True, available__gt=0)
 
         category = params.get("category")
         if category:
@@ -182,8 +186,6 @@ class ResourceBrowseViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(
                 Q(name__icontains=keyword) | Q(description__icontains=keyword)
             )
-
-        self._validate_date_range(params.get("start_date"), params.get("end_date"))
         return qs
 
     @staticmethod
@@ -197,6 +199,7 @@ class ResourceBrowseViewSet(viewsets.ReadOnlyModelViewSet):
 # ---------------------------------------------------------------------------
 # Bookings (employees)
 # ---------------------------------------------------------------------------
+
 class BookingViewSet(viewsets.ModelViewSet):
     """Employees submit, browse and cancel their own bookings.
 
@@ -230,7 +233,7 @@ class BookingViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
-        """Cancel a pending or approved booking (open while rules are TBD)."""
+        """Cancel a pending or approved booking (open while rules are To be Determined)."""
         booking = self.get_object()
         if booking.status in (Booking.Status.CANCELLED, Booking.Status.COMPLETED):
             return Response(
@@ -238,12 +241,11 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        with transaction.atomic():
-            # If it was holding stock, return that stock to the pool.
-            if booking.status == Booking.Status.APPROVED:
-                _release_booking_stock(booking)
-            booking.status = Booking.Status.CANCELLED
-            booking.save(update_fields=["status", "date_updated"])
+        # Availability is derived from approved bookings, so cancelling simply
+        # drops this booking out of the reservation set -- its units are free
+        # again automatically, no counters to restore.
+        booking.status = Booking.Status.CANCELLED
+        booking.save(update_fields=["status", "date_updated"])
 
         return Response(BookingSerializer(booking, context={"request": request}).data)
 
@@ -251,6 +253,7 @@ class BookingViewSet(viewsets.ModelViewSet):
 # ---------------------------------------------------------------------------
 # Booking approval (managers)
 # ---------------------------------------------------------------------------
+
 class BookingApprovalViewSet(viewsets.ReadOnlyModelViewSet):
     """Managers view all booking requests and approve or reject them.
 
@@ -304,9 +307,11 @@ class BookingApprovalViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         with transaction.atomic():
-            # Re-check and reserve under a row lock so concurrent approvals
-            # cannot both consume the same stock.
-            items = booking.items.select_related("resource")
+            # Lock each resource row so concurrent approvals of overlapping
+            # bookings are serialised and cannot both consume the same stock.
+            # Availability is re-derived from approved bookings over THIS
+            # booking's date range (FIFO: already-approved overlaps count).
+            items = list(booking.items.select_related("resource"))
             for item in items:
                 resource = Resource.objects.select_for_update().get(pk=item.resource_id)
                 if not resource.is_active:
@@ -314,33 +319,24 @@ class BookingApprovalViewSet(viewsets.ReadOnlyModelViewSet):
                         {"detail": f"Resource '{resource.name}' is inactive."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                if item.quantity > resource.available_quantity:
+                available = resource.available_quantity(
+                    booking.start_date,
+                    booking.end_date,
+                    exclude_booking_id=booking.id,
+                )
+                if item.quantity > available:
                     return Response(
                         {
                             "detail": (
-                                f"Only {resource.available_quantity} of "
-                                f"'{resource.name}' remain; cannot approve."
+                                f"Only {available} of '{resource.name}' are free "
+                                f"for {booking.start_date} to {booking.end_date}; "
+                                f"cannot approve."
                             )
                         },
                         status=status.HTTP_409_CONFLICT,
                     )
 
-            # All items satisfiable -> reserve.
-            for item in items:
-                resource = Resource.objects.select_for_update().get(pk=item.resource_id)
-                resource.available_quantity -= item.quantity
-                if resource.available_quantity == 0:
-                    resource.is_booked = True
-                    resource.is_returned = False
-                resource.save(
-                    update_fields=[
-                        "available_quantity",
-                        "is_booked",
-                        "is_returned",
-                        "date_updated",
-                    ]
-                )
-
+            # All items satisfiable -> approving reserves them for the period.
             booking.status = Booking.Status.APPROVED
             booking.save(update_fields=["status", "date_updated"])
 
@@ -363,30 +359,3 @@ class BookingApprovalViewSet(viewsets.ReadOnlyModelViewSet):
         booking.rejection_reason = serializer.validated_data["rejection_reason"]
         booking.save(update_fields=["status", "rejection_reason", "date_updated"])
         return Response(self.get_serializer(booking).data)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _release_booking_stock(booking):
-    """Return a booking's reserved stock to the available pool.
-
-    Used when an approved booking is cancelled: resources become bookable
-    again (returned, not booked) so any employee may request them next.
-    """
-    for item in booking.items.select_related("resource"):
-        resource = Resource.objects.select_for_update().get(pk=item.resource_id)
-        resource.available_quantity = min(
-            resource.total_quantity,
-            resource.available_quantity + item.quantity,
-        )
-        resource.is_booked = False
-        resource.is_returned = True
-        resource.save(
-            update_fields=[
-                "available_quantity",
-                "is_booked",
-                "is_returned",
-                "date_updated",
-            ]
-        )

@@ -19,6 +19,7 @@ from .models import Booking, BookingItem, Category, Resource, User
 # ---------------------------------------------------------------------------
 # Users / authentication
 # ---------------------------------------------------------------------------
+
 class UserRegistrationSerializer(serializers.ModelSerializer):
     """Registers a new user.
 
@@ -72,6 +73,7 @@ class RequestingUserSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 # Catalogue
 # ---------------------------------------------------------------------------
+
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
@@ -93,40 +95,24 @@ class ResourceSerializer(serializers.ModelSerializer):
             "category",
             "category_name",
             "total_quantity",
-            "available_quantity",
             "location",
             "is_active",
-            "is_booked",
-            "is_returned",
             "date_created",
             "date_updated",
         ]
         read_only_fields = ["id", "date_created", "date_updated"]
 
-    def validate(self, attrs):
-        total = attrs.get(
-            "total_quantity",
-            getattr(self.instance, "total_quantity", 0),
-        )
-        available = attrs.get(
-            "available_quantity",
-            getattr(self.instance, "available_quantity", 0),
-        )
-        if available > total:
-            raise serializers.ValidationError(
-                {"available_quantity": "Cannot exceed total_quantity."}
-            )
-        return attrs
-
 
 class ResourceBrowseSerializer(serializers.ModelSerializer):
     """Read-only resource view for employees browsing the catalogue.
 
-    Internal bookkeeping flags are summarised as a single availability hint
-    rather than exposed directly.
+    ``available`` is the number of units free for the requested date range
+    (derived from approved bookings). When no range is supplied it reports the
+    total quantity. Internal reservation state is never exposed directly.
     """
 
     category_name = serializers.CharField(source="category.name", read_only=True)
+    available = serializers.SerializerMethodField()
 
     class Meta:
         model = Resource
@@ -136,16 +122,23 @@ class ResourceBrowseSerializer(serializers.ModelSerializer):
             "description",
             "category",
             "category_name",
-            "available_quantity",
+            "total_quantity",
+            "available",
             "location",
             "is_active",
         ]
         read_only_fields = fields
 
+    def get_available(self, obj) -> int:
+        # Prefer the queryset annotation (set by the view for a date range);
+        # otherwise fall back to the full stock.
+        return getattr(obj, "available", obj.total_quantity)
+
 
 # ---------------------------------------------------------------------------
 # Bookings
 # ---------------------------------------------------------------------------
+
 class BookingItemSerializer(serializers.ModelSerializer):
     resource_name = serializers.CharField(source="resource.name", read_only=True)
 
@@ -204,7 +197,8 @@ class BookingSerializer(serializers.ModelSerializer):
                 {"items": "A booking must contain at least one resource."}
             )
 
-        # Prevent booking inactive resources or more than is available.
+        # Prevent booking inactive resources, or more than is free for the
+        # requested period (availability derived from approved bookings).
         for item in items:
             resource = item["resource"]
             quantity = item["quantity"]
@@ -212,12 +206,13 @@ class BookingSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"items": f"Resource '{resource.name}' is inactive and cannot be booked."}
                 )
-            if quantity > resource.available_quantity:
+            available = resource.available_quantity(start, end)
+            if quantity > available:
                 raise serializers.ValidationError(
                     {
                         "items": (
-                            f"Only {resource.available_quantity} of "
-                            f"'{resource.name}' are available."
+                            f"Only {available} of '{resource.name}' are "
+                            f"available for {start} to {end}."
                         )
                     }
                 )

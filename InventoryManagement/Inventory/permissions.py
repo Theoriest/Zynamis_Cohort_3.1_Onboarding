@@ -4,7 +4,7 @@ These permission classes implement the role decisions:
 
 - Admin:            full access to every view.
 - Resource Manager: resource management + booking approval only.
-- Employee:         browse resources and make / manage their own bookings.
+- Employee:         browse resources and make / manage their own bookings(This allows them to delete).
 
 Bookings are deliberately employee-only so that admins and resource
 managers cannot book from their privileged accounts (they must use their
