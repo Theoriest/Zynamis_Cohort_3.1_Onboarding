@@ -69,7 +69,7 @@ exactly.
 > **Why this matters:** the same resource can be fully booked for one period
 > and fully available for a non-overlapping period — and cancelling or
 > rejecting a booking frees its units automatically, with no counters to keep
-> in sync.
+> in sync. And these allows the employees to pre book a resource for when its next available.
 
 ### Validation & data integrity
 - `end_date > start_date` enforced both in the serializer and as a DB
@@ -134,16 +134,62 @@ InventoryManagement/
 ## Setup
 
 ### 1. Clone & create a virtualenv
+
+Create a virtual environment, activate it, then install the dependencies from
+`InventoryManagement/requirements.txt`. The activate command and the Python
+executable name differ per OS — use the guide for your machine.
+
+<details open>
+<summary><strong>Linux</strong></summary>
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r InventoryManagement/requirements.txt
 ```
+</details>
+
+<details>
+<summary><strong>macOS</strong></summary>
+
+```bash
+# If Python 3 is missing: brew install python
+python3 -m venv venv
+source venv/bin/activate
+pip install -r InventoryManagement/requirements.txt
+```
+</details>
+
+<details>
+<summary><strong>Windows — PowerShell</strong></summary>
+
+```powershell
+py -3 -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r InventoryManagement\requirements.txt
+```
+
+> If activation is blocked, allow scripts for this session first:
+> `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`
+</details>
+
+<details>
+<summary><strong>Windows — Command Prompt (cmd)</strong></summary>
+
+```bat
+py -3 -m venv venv
+venv\Scripts\activate.bat
+pip install -r InventoryManagement\requirements.txt
+```
+</details>
+
+You know it worked when your prompt is prefixed with `(venv)`. To leave the
+environment later, run `deactivate`.
 
 ### 2. PostgreSQL
 Create a database and user to match your `.env` (SQLite is not used):
 ```sql
-CREATE USER inventory WITH PASSWORD 'inventory' CREATEDB;
+CREATE USER inventory WITH PASSWORD 'gomugomu56' CREATEDB;
 CREATE DATABASE inventory OWNER inventory;
 ```
 
@@ -184,7 +230,7 @@ python manage.py seed_strawhats --flush
 It creates:
 - **Users / roles** — Robin (Admin); Nami & Franky (Resource Managers);
   Luffy, Zoro, Usopp, Sanji, Chopper, Brook, Jinbe (Employees).
-  *Every account's password is `GomuGomu123`.*
+  *Every account's password is `GomuGomu56`.*
 - **Categories** — Navigation, Combat Equipment, Medical, Culinary,
   Ship Equipment, Communication.
 - **Resources** — Log Pose, Clima-Tact, Rumble Ball Kit, Den Den Mushi, etc.
@@ -203,16 +249,57 @@ With the server running:
   `InventoryManagement/openapi-schema.yml`).
 
 ### Authentication
+
+Logging in at `POST /api/auth/token/` returns **two** tokens:
+
+- **`access`** — short-lived (30 min). This is the one you send on every
+  request. Pass it as `Authorization: Bearer <access>`.
+- **`refresh`** — longer-lived (1 day). *Not* sent to API endpoints; used only
+  at `/api/auth/token/refresh/` to mint a new access token when the old one
+  expires.
+
+Always pass the **access** token, never the refresh one.
+
 ```bash
 # obtain tokens
 curl -X POST http://localhost:8000/api/auth/token/ \
   -H "Content-Type: application/json" \
-  -d '{"username": "luffy", "password": "GomuGomu123"}'
+  -d '{"username": "luffy", "password": "GomuGomu56"}'
 
 # use the access token
 curl http://localhost:8000/api/resources/ \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
+
+# refresh when the access token expires (401 token_not_valid)
+curl -X POST http://localhost:8000/api/auth/token/refresh/ \
+  -H "Content-Type: application/json" \
+  -d '{"refresh": "<REFRESH_TOKEN>"}'
 ```
+
+#### Authorizing in the Swagger docs page
+
+On http://localhost:8000/api/docs/ the **Authorize** button uses the HTTP
+`Bearer` scheme, which means Swagger adds the word `Bearer` for you:
+
+1. Log in (via `POST /api/auth/token/` above, or the endpoint's **Try it out**)
+   and copy the **`access`** token value.
+2. Click **Authorize** (padlock, top-right).
+3. In the value box paste **only the raw access token** — the app already sets
+   the `Bearer ` prefix for you, so **do not** add `Bearer ` and **do not** wrap
+   the token in quotation marks. Paste it on a single line with no spaces or
+   line breaks:
+   ```
+   eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.<rest-of-the-access-token>
+   ```
+   ✅ `eyJhbGciOiJ...UXU`  ❌ `Bearer eyJhbGciOiJ...`  ❌ `"eyJhbGciOiJ..."`
+4. Click **Authorize**, then **Close**. Every **Try it out** call is now
+   authenticated.
+
+> **Common mistakes:** typing `Bearer ` in the box (becomes `Bearer Bearer …`
+> and fails with *"Authorization header must contain two space-delimited
+> values"*); pasting the **refresh** token instead of the access token; or a
+> line break inside the pasted token. If calls return `401 token_not_valid`,
+> the access token has expired — log in again for a fresh one.
 
 ### Endpoint overview
 | Area | Endpoint | Who |

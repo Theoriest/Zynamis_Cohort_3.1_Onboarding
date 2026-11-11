@@ -178,6 +178,11 @@ SPECTACULAR_SETTINGS = {
                    'role-based access (Admin / Resource Manager / Employee).',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    # Pin the ReDoc CDN bundle. The default `redoc@latest` now resolves to
+    # ReDoc 3.x, whose bundle is incompatible with the `<redoc spec-url>`
+    # markup drf-spectacular emits, which rendered a blank page. 2.1.5 is a
+    # known-good release that works with this template.
+    'REDOC_DIST': 'https://cdn.jsdelivr.net/npm/redoc@2.1.5',
 }
 
 # Simple JWT (signed access / refresh tokens)
