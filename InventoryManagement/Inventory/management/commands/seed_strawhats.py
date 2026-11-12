@@ -21,7 +21,7 @@ from django.db import transaction
 
 from Inventory.models import Booking, BookingItem, Category, Resource, User
 
-PASSWORD = "GomuGomu123"  # demo password for every seeded account
+PASSWORD = "GomuGomu56"  # demo password for every seeded account
 
 # (username, role, first, last, email)
 CREW = [
@@ -43,7 +43,7 @@ CATEGORIES = {
     "Combat Equipment": "Weapons and gear for crew defence.",
     "Medical": "Chopper's clinic supplies.",
     "Culinary": "Sanji's galley equipment.",
-    "Ship Equipment": "Thousand Sunny systems and small craft.",
+    "Ship Equipment": "Thousand Sunny Docker systems 1 through 4.",
     "Communication": "Den Den Mushi and signalling gear.",
 }
 
